@@ -1,0 +1,135 @@
+// GET /my-profile — fetch the current user's customer profile + partner + user + activations.
+// Auth required: JWT extracted in caller (auth-me) provides userId.
+// JSON body: {userId}
+// Returns {profile, partner, user, activations} with 200.
+// Provided by acme-crm package.
+
+module customer_profile_get
+
+import collections/ops
+import persistence/store
+import services/common
+import strings/ops
+
+workflow customer_profile_get {
+  start: ValidateUserId
+
+  state ValidateUserId {
+    action strings/ops/ops.AssertRequired(
+      value: $json.userId,
+      code: "invalid_input",
+      message: "userId is required"
+    ) as UserCheck
+    on success -> FindProfile
+    on error -> ValidateUserIdFailed
+  }
+
+  state FindProfile {
+    action persistence/store/store.FindByField(
+      collection: "customer_profiles",
+      field: "userId",
+      value: $json.userId
+    ) as ProfileResult
+    on success -> AssertProfileFound
+    on error -> FindProfileFailed
+  }
+
+  state AssertProfileFound {
+    action collections/ops/ops.AssertFound(
+      found: $ProfileResult.response.found,
+      doc: $ProfileResult.response.doc,
+      code: "profile_not_found",
+      message: "customer profile not found for this user"
+    ) as ProfileAssert
+    on success -> GetPartner
+    on error -> AssertProfileFoundFailed
+  }
+
+  state GetPartner {
+    action persistence/store/store.Get(
+      collection: "partners",
+      id: $ProfileResult.response.doc.partnerId
+    ) as PartnerResult
+    on success -> GetUser
+    on error -> GetPartnerFailed
+  }
+
+  state GetUser {
+    action persistence/store/store.Get(
+      collection: "users",
+      id: $ProfileResult.response.doc.userId
+    ) as UserResult
+    on success -> FindActivations
+    on error -> GetUserFailed
+  }
+
+  state FindActivations {
+    action persistence/store/store.List(
+      collection: "activations",
+      filter: { customerProfileId: $ProfileResult.response.doc.id }
+    ) as ActivationsResult
+    on success -> OK
+    on error -> FindActivationsFailed
+  }
+
+  state OK {
+    action services/common/response.Response(
+      value: {
+        profile: $ProfileResult.response.doc,
+        partner: $PartnerResult.response.doc,
+        user: $UserResult.response.doc,
+        activations: $ActivationsResult.response.docs
+      },
+      statusCode: 200
+    ) as FinalResult
+    end ok
+  }
+
+  state ValidateUserIdFailed {
+    action services/common/response.Response(
+      value: { message: $UserCheck.response.message },
+      statusCode: 400
+    ) as ErrorResult
+    end fail
+  }
+
+  state FindProfileFailed {
+    action services/common/response.Response(
+      value: { message: $ProfileResult.response.message },
+      statusCode: 500
+    ) as ErrorResult
+    end fail
+  }
+
+  state AssertProfileFoundFailed {
+    action services/common/response.Response(
+      value: { message: $ProfileAssert.response.message },
+      statusCode: 404
+    ) as ErrorResult
+    end fail
+  }
+
+  state GetPartnerFailed {
+    action services/common/response.Response(
+      value: { message: $PartnerResult.response.message },
+      statusCode: 404
+    ) as ErrorResult
+    end fail
+  }
+
+  state GetUserFailed {
+    action services/common/response.Response(
+      value: { message: $UserResult.response.message },
+      statusCode: 404
+    ) as ErrorResult
+    end fail
+  }
+
+  state FindActivationsFailed {
+    action services/common/response.Response(
+      value: { message: $ActivationsResult.response.message },
+      statusCode: 500
+    ) as ErrorResult
+    end fail
+  }
+}

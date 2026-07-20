@@ -1,0 +1,40 @@
+// GET /activation-codes — admin lists all activation codes.
+// No input. Returns {count, items} with 200.
+// Provided by acme-crm package.
+
+module activation_code_list
+
+import persistence/store
+import services/common
+
+workflow activation_code_list {
+  start: List
+
+  state List {
+    action persistence/store/store.List(
+      collection: "activation_codes",
+      filter: {}
+    ) as Result
+    on success -> OK
+    on error -> ListFailed
+  }
+
+  state OK {
+    action services/common/response.Response(
+      value: {
+        count: $Result.response.count,
+        items: $Result.response.docs
+      },
+      statusCode: 200
+    ) as FinalResult
+    end ok
+  }
+
+  state ListFailed {
+    action services/common/response.Response(
+      value: { message: $Result.response.message },
+      statusCode: 500
+    ) as ErrorResult
+    end fail
+  }
+}

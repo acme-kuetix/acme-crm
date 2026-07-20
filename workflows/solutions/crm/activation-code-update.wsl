@@ -1,0 +1,68 @@
+// PUT /activation-codes/{id} — admin updates an activation code's mutable fields.
+// URL param: id. JSON body: {code?, productId?, productType?, partnerTemplateId?, maxUses?, active?, expiresAt?}
+// The usedCount field is preserved (cannot be set via this endpoint).
+// Returns the updated activation_code doc with 200.
+// Provided by acme-crm package.
+
+module activation_code_update
+
+import persistence/store
+import services/common
+
+workflow activation_code_update {
+  start: Load
+
+  state Load {
+    action persistence/store/store.Get(
+      collection: "activation_codes",
+      id: $url.id
+    ) as LoadResult
+    on success -> Update
+    on error -> LoadFailed
+  }
+
+  state Update {
+    action persistence/store/store.Update(
+      collection: "activation_codes",
+      id: $url.id,
+      doc: {
+        id: $url.id,
+        code: $json.code??$LoadResult.response.doc.code,
+        productId: $json.productId??$LoadResult.response.doc.productId,
+        productType: $json.productType??$LoadResult.response.doc.productType,
+        partnerTemplateId: $json.partnerTemplateId??$LoadResult.response.doc.partnerTemplateId,
+        maxUses: $json.maxUses??$LoadResult.response.doc.maxUses,
+        usedCount: $LoadResult.response.doc.usedCount,
+        active: $json.active??$LoadResult.response.doc.active,
+        expiresAt: $json.expiresAt??$LoadResult.response.doc.expiresAt,
+        createdAt: $LoadResult.response.doc.createdAt
+      }
+    ) as Result
+    on success -> OK
+    on error -> UpdateFailed
+  }
+
+  state OK {
+    action services/common/response.Response(
+      value: $Result.response.doc,
+      statusCode: 200
+    ) as FinalResult
+    end ok
+  }
+
+  state LoadFailed {
+    action services/common/response.Response(
+      value: { message: $LoadResult.response.message, id: $url.id },
+      statusCode: 404
+    ) as ErrorResult
+    end fail
+  }
+
+  state UpdateFailed {
+    action services/common/response.Response(
+      value: { message: $Result.response.message, id: $url.id },
+      statusCode: 500
+    ) as ErrorResult
+    end fail
+  }
+}

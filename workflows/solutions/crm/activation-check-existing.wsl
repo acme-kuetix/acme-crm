@@ -1,0 +1,22 @@
+// Sub-workflow called by activation-redeem's Filter: checks if an existing
+// activation matches the productId being redeemed.
+// Reads $element (an activation doc) + shared context productId (set by caller).
+// Returns true if the activation's productId matches, false otherwise.
+
+module activation_check_existing
+
+import services/common
+
+workflow activation_check_existing {
+  start: Compare
+
+  state Compare {
+    action services/common/response.Response(
+      value: {
+        match: $element.productId == $json.productId
+      },
+      statusCode: 200
+    ) as Result
+    end ok
+  }
+}

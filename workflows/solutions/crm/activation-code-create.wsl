@@ -1,0 +1,120 @@
+// POST /activation-codes — admin creates a pre-generated activation code for a product.
+// JSON body: {code, productId, productType, partnerTemplateId?, maxUses?, expiresAt?}
+// Returns the created activation_code doc with 201.
+// Provided by acme-crm package.
+
+module activation_code_create
+
+import persistence/store
+import sequence/sequence
+import services/common
+import strings/ops
+
+workflow activation_code_create {
+  start: ValidateCode
+
+  state ValidateCode {
+    action strings/ops/ops.AssertRequired(
+      value: $json.code,
+      code: "invalid_code",
+      message: "activation code is required"
+    ) as CodeValid
+    on success -> CheckCodeUnique
+    on error -> ValidateCodeFailed
+  }
+
+  state CheckCodeUnique {
+    action persistence/store/store.AssertUnique(
+      collection: "activation_codes",
+      field: "code",
+      value: $CodeValid.response.value
+    ) as UniqueResult
+    on success -> ValidateProductType
+    on error -> CheckCodeUniqueFailed
+  }
+
+  state ValidateProductType {
+    action strings/ops/ops.AssertRequired(
+      value: $json.productType,
+      code: "invalid_product_type",
+      message: "productType is required (invoicing, operations, accounting, commerce, platform, or erp for all business products)"
+    ) as TypeValid
+    on success -> GetId
+    on error -> ValidateProductTypeFailed
+  }
+
+  state GetId {
+    action sequence/sequence.NextByCode(code: "activation_code", scope: "") as IdResult
+    on success -> Create
+    on error -> GetIdFailed
+  }
+
+  state Create {
+    action persistence/store/store.Create(
+      collection: "activation_codes",
+      id: $IdResult.response.formatted,
+      doc: {
+        id: $IdResult.response.formatted,
+        code: $CodeValid.response.value,
+        productId: $json.productId,
+        productType: $TypeValid.response.value,
+        partnerTemplateId: $json.partnerTemplateId??"",
+        maxUses: $json.maxUses??1,
+        usedCount: 0,
+        active: true,
+        expiresAt: $json.expiresAt??"",
+        createdAt: "now"
+      }
+    ) as Result
+    on success -> OK
+    on error -> CreateFailed
+  }
+
+  state OK {
+    action services/common/response.Response(
+      value: $Result.response.doc,
+      statusCode: 201
+    ) as FinalResult
+    end ok
+  }
+
+  state ValidateCodeFailed {
+    action services/common/response.Response(
+      value: { message: $CodeValid.response.message },
+      statusCode: 400
+    ) as ErrorResult
+    end fail
+  }
+
+  state CheckCodeUniqueFailed {
+    action services/common/response.Response(
+      value: { message: $UniqueResult.response.message },
+      statusCode: 409
+    ) as ErrorResult
+    end fail
+  }
+
+  state ValidateProductTypeFailed {
+    action services/common/response.Response(
+      value: { message: $TypeValid.response.message },
+      statusCode: 400
+    ) as ErrorResult
+    end fail
+  }
+
+  state GetIdFailed {
+    action services/common/response.Response(
+      value: { message: $IdResult.response.message },
+      statusCode: 500
+    ) as ErrorResult
+    end fail
+  }
+
+  state CreateFailed {
+    action services/common/response.Response(
+      value: { message: $Result.response.message },
+      statusCode: 500
+    ) as ErrorResult
+    end fail
+  }
+}

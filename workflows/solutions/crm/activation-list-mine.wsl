@@ -1,0 +1,98 @@
+// GET /my-activations — list the current user's activations.
+// JSON body: {userId}
+// Returns {count, items} with 200.
+// Provided by acme-crm package.
+
+module activation_list_mine
+
+import collections/ops
+import persistence/store
+import services/common
+import strings/ops
+
+workflow activation_list_mine {
+  start: ValidateUserId
+
+  state ValidateUserId {
+    action strings/ops/ops.AssertRequired(
+      value: $json.userId,
+      code: "invalid_input",
+      message: "userId is required"
+    ) as UserCheck
+    on success -> FindProfile
+    on error -> ValidateUserIdFailed
+  }
+
+  state FindProfile {
+    action persistence/store/store.FindByField(
+      collection: "customer_profiles",
+      field: "userId",
+      value: $json.userId
+    ) as ProfileResult
+    on success -> AssertProfileFound
+    on error -> FindProfileFailed
+  }
+
+  state AssertProfileFound {
+    action collections/ops/ops.AssertFound(
+      found: $ProfileResult.response.found,
+      doc: $ProfileResult.response.doc,
+      code: "profile_not_found",
+      message: "customer profile not found for this user"
+    ) as ProfileAssert
+    on success -> FindActivations
+    on error -> AssertProfileFoundFailed
+  }
+
+  state FindActivations {
+    action persistence/store/store.List(
+      collection: "activations",
+      filter: { customerProfileId: $ProfileResult.response.doc.id }
+    ) as ActivationsResult
+    on success -> OK
+    on error -> FindActivationsFailed
+  }
+
+  state OK {
+    action services/common/response.Response(
+      value: {
+        count: $ActivationsResult.response.count,
+        items: $ActivationsResult.response.docs
+      },
+      statusCode: 200
+    ) as FinalResult
+    end ok
+  }
+
+  state ValidateUserIdFailed {
+    action services/common/response.Response(
+      value: { message: $UserCheck.response.message },
+      statusCode: 400
+    ) as ErrorResult
+    end fail
+  }
+
+  state FindProfileFailed {
+    action services/common/response.Response(
+      value: { message: $ProfileResult.response.message },
+      statusCode: 500
+    ) as ErrorResult
+    end fail
+  }
+
+  state AssertProfileFoundFailed {
+    action services/common/response.Response(
+      value: { message: $ProfileAssert.response.message },
+      statusCode: 404
+    ) as ErrorResult
+    end fail
+  }
+
+  state FindActivationsFailed {
+    action services/common/response.Response(
+      value: { message: $ActivationsResult.response.message },
+      statusCode: 500
+    ) as ErrorResult
+    end fail
+  }
+}

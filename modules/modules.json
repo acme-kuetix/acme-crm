@@ -1,0 +1,12 @@
+{
+  "crm/crm": {
+    "info": {
+      "go_module": "github.com/acme-kuetix/acme-crm",
+      "namespace": "crm",
+      "class": "crm",
+      "label": "Crm Module",
+      "description": "Handles crm operations for crm service"
+    },
+    "methods": null
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "name": "acme-crm",
+  "version": "0.1.0",
+  "description": "Acme package with reusable workflows for customer relationship management: customer registration, customer profiles, product activation codes, and activation redemption",
+  "author": "acme",
+  "workflows": [],
+  "features": [],
+  "solutions": [],
+  "dependencies": {
+    "github.com/kuetix/std-core": "v1.0.0"
+  }
+}

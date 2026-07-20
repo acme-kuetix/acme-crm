@@ -1,0 +1,323 @@
+// POST /auth/register — public customer self-registration.
+// JSON body: {username, email, password, displayName}
+// Flow: validate username + password → hash password → create user →
+// create partner (isCustomer=true) → create customer_profile linking them →
+// add user to CUSTOMER group → issue JWT.
+// Returns {token, userId, username, email, customerProfileId} with 201.
+// Provided by acme-crm package.
+//
+// Per-state failure handlers use LITERAL statusCode (not $?) because
+// worker.SetError overwrites $? to 500 on every error path.
+
+module customer_register
+
+import auth
+import collections/ops
+import core/utils
+import crypto/crypto
+import persistence/store
+import sequence/sequence
+import services/common
+import strings/ops
+
+workflow customer_register {
+  start: ValidateUsername
+
+  state ValidateUsername {
+    action strings/ops/ops.AssertRequired(
+      value: $json.username,
+      code: "invalid_username",
+      message: "username is required"
+    ) as NameValid
+    on success -> CheckUsername
+    on error -> ValidateUsernameFailed
+  }
+
+  state CheckUsername {
+    action persistence/store/store.AssertUnique(
+      collection: "users",
+      field: "username",
+      value: $NameValid.response.value
+    ) as UniqueResult
+    on success -> ValidatePassword
+    on error -> CheckUsernameFailed
+  }
+
+  state ValidatePassword {
+    action strings/ops/ops.AssertRequired(
+      value: $json.password,
+      code: "invalid_password",
+      message: "password is required"
+    ) as PwRequired
+    on success -> AssertPwLength
+    on error -> ValidatePasswordFailed
+  }
+
+  state AssertPwLength {
+    action strings/ops/ops.AssertMinLength(
+      value: $PwRequired.response.value,
+      min: 6,
+      code: "password_too_short",
+      message: "password must be at least 6 characters long"
+    ) as PwLength
+    on success -> HashPassword
+    on error -> AssertPwLengthFailed
+  }
+
+  state HashPassword {
+    action crypto/crypto.Hash(value: $PwRequired.response.value) as HashResult
+    on success -> GetUserId
+    on error -> HashPasswordFailed
+  }
+
+  state GetUserId {
+    action sequence/sequence.NextByCode(code: "user", scope: "") as UserIdResult
+    on success -> CreateUser
+    on error -> GetUserIdFailed
+  }
+
+  state CreateUser {
+    action persistence/store/store.Create(
+      collection: "users",
+      id: $UserIdResult.response.formatted,
+      doc: {
+        id: $UserIdResult.response.formatted,
+        username: $NameValid.response.value,
+        email: $json.email,
+        passwordHash: $HashResult.response.hash,
+        groupIds: [],
+        active: true,
+        createdAt: "now",
+        updatedAt: "now"
+      }
+    ) as UserResult
+    on success -> GetPartnerId
+    on error -> CreateUserFailed
+  }
+
+  state GetPartnerId {
+    action sequence/sequence.NextByCode(code: "partner", scope: "") as PartnerIdResult
+    on success -> CreatePartner
+    on error -> GetPartnerIdFailed
+  }
+
+  state CreatePartner {
+    action persistence/store/store.Create(
+      collection: "partners",
+      id: $PartnerIdResult.response.formatted,
+      doc: {
+        id: $PartnerIdResult.response.formatted,
+        name: $json.displayName,
+        email: $json.email,
+        phone: "",
+        taxId: "",
+        isCustomer: true,
+        isSupplier: false,
+        createdAt: "now",
+        updatedAt: "now"
+      }
+    ) as PartnerResult
+    on success -> GetProfileId
+    on error -> CreatePartnerFailed
+  }
+
+  state GetProfileId {
+    action sequence/sequence.NextByCode(code: "customer_profile", scope: "") as ProfileIdResult
+    on success -> CreateProfile
+    on error -> GetProfileIdFailed
+  }
+
+  state CreateProfile {
+    action persistence/store/store.Create(
+      collection: "customer_profiles",
+      id: $ProfileIdResult.response.formatted,
+      doc: {
+        id: $ProfileIdResult.response.formatted,
+        userId: $UserIdResult.response.formatted,
+        partnerId: $PartnerIdResult.response.formatted,
+        displayName: $json.displayName,
+        createdAt: "now",
+        updatedAt: "now"
+      }
+    ) as ProfileResult
+    on success -> FindCustomerGroup
+    on error -> CreateProfileFailed
+  }
+
+  state FindCustomerGroup {
+    action persistence/store/store.FindByField(
+      collection: "groups",
+      field: "code",
+      value: "CUSTOMER"
+    ) as GroupResult
+    on success -> AssertGroupFound
+    on error -> FindCustomerGroupFailed
+  }
+
+  state AssertGroupFound {
+    action collections/ops/ops.AssertFound(
+      found: $GroupResult.response.found,
+      doc: $GroupResult.response.doc,
+      code: "customer_group_not_found",
+      message: "CUSTOMER group not found; seed the CRM data first"
+    ) as GroupAssert
+    on success -> AddUserToGroup
+    on error -> AssertGroupFoundFailed
+  }
+
+  state AddUserToGroup {
+    action persistence/store/store.ArrayAppendUnique(
+      collection: "users",
+      id: $UserIdResult.response.formatted,
+      field: "groupIds",
+      element: $GroupResult.response.doc.id
+    ) as AddResult
+    on success -> IssueToken
+    on error -> AddUserToGroupFailed
+  }
+
+  state IssueToken {
+    action auth/jwt.GenerateToken(
+      userID: $UserIdResult.response.formatted,
+      username: $NameValid.response.value,
+      email: $json.email,
+      expiresInHours: 24
+    ) as Token
+    on success -> OK
+    on error -> IssueTokenFailed
+  }
+
+  state OK {
+    action services/common/response.Response(
+      value: {
+        token: $Token.response.token,
+        userId: $UserIdResult.response.formatted,
+        username: $NameValid.response.value,
+        email: $json.email,
+        customerProfileId: $ProfileIdResult.response.formatted
+      },
+      statusCode: 201
+    ) as FinalResult
+    end ok
+  }
+
+  state ValidateUsernameFailed {
+    action services/common/response.Response(
+      value: { message: $NameValid.response.message },
+      statusCode: 400
+    ) as ErrorResult
+    end fail
+  }
+
+  state CheckUsernameFailed {
+    action services/common/response.Response(
+      value: { message: $UniqueResult.response.message },
+      statusCode: 409
+    ) as ErrorResult
+    end fail
+  }
+
+  state ValidatePasswordFailed {
+    action services/common/response.Response(
+      value: { message: $PwRequired.response.message },
+      statusCode: 400
+    ) as ErrorResult
+    end fail
+  }
+
+  state AssertPwLengthFailed {
+    action services/common/response.Response(
+      value: { message: $PwLength.response.message },
+      statusCode: 400
+    ) as ErrorResult
+    end fail
+  }
+
+  state HashPasswordFailed {
+    action services/common/response.Response(
+      value: { message: "password hashing failed" },
+      statusCode: 500
+    ) as ErrorResult
+    end fail
+  }
+
+  state GetUserIdFailed {
+    action services/common/response.Response(
+      value: { message: $UserIdResult.response.message },
+      statusCode: 500
+    ) as ErrorResult
+    end fail
+  }
+
+  state CreateUserFailed {
+    action services/common/response.Response(
+      value: { message: $UserResult.response.message },
+      statusCode: 500
+    ) as ErrorResult
+    end fail
+  }
+
+  state GetPartnerIdFailed {
+    action services/common/response.Response(
+      value: { message: $PartnerIdResult.response.message },
+      statusCode: 500
+    ) as ErrorResult
+    end fail
+  }
+
+  state CreatePartnerFailed {
+    action services/common/response.Response(
+      value: { message: $PartnerResult.response.message },
+      statusCode: 500
+    ) as ErrorResult
+    end fail
+  }
+
+  state GetProfileIdFailed {
+    action services/common/response.Response(
+      value: { message: $ProfileIdResult.response.message },
+      statusCode: 500
+    ) as ErrorResult
+    end fail
+  }
+
+  state CreateProfileFailed {
+    action services/common/response.Response(
+      value: { message: $ProfileResult.response.message },
+      statusCode: 500
+    ) as ErrorResult
+    end fail
+  }
+
+  state FindCustomerGroupFailed {
+    action services/common/response.Response(
+      value: { message: $GroupResult.response.message },
+      statusCode: 500
+    ) as ErrorResult
+    end fail
+  }
+
+  state AssertGroupFoundFailed {
+    action services/common/response.Response(
+      value: { message: $GroupAssert.response.message },
+      statusCode: 500
+    ) as ErrorResult
+    end fail
+  }
+
+  state AddUserToGroupFailed {
+    action services/common/response.Response(
+      value: { message: $AddResult.response.message },
+      statusCode: 500
+    ) as ErrorResult
+    end fail
+  }
+
+  state IssueTokenFailed {
+    action services/common/response.Response(
+      value: { message: "token generation failed" },
+      statusCode: 500
+    ) as ErrorResult
+    end fail
+  }
+}

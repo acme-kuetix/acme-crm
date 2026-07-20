@@ -1,0 +1,116 @@
+// POST /activation-codes/validate — public validation of an activation code.
+// JSON body: {code}
+// Returns {valid, productId, productType} or {valid: false, reason} with 200.
+// Provided by acme-crm package.
+
+module activation_code_validate
+
+import collections/ops
+import math/ops
+import persistence/store
+import services/common
+import strings/ops
+
+workflow activation_code_validate {
+  start: ValidateCode
+
+  state ValidateCode {
+    action strings/ops/ops.AssertRequired(
+      value: $json.code,
+      code: "invalid_code",
+      message: "code is required"
+    ) as CodeValid
+    on success -> FindCode
+    on error -> ValidateCodeFailed
+  }
+
+  state FindCode {
+    action persistence/store/store.FindByField(
+      collection: "activation_codes",
+      field: "code",
+      value: $CodeValid.response.value
+    ) as FindResult
+    on success -> AssertFound
+    on error -> FindCodeFailed
+  }
+
+  state AssertFound {
+    action collections/ops/ops.AssertFound(
+      found: $FindResult.response.found,
+      doc: $FindResult.response.doc,
+      code: "not_found",
+      message: "activation code not found"
+    ) as FoundAssert
+    on success -> CheckActive
+    on error -> NotValid
+  }
+
+  state CheckActive {
+    action strings/ops/ops.AssertEquals(
+      value: $FindResult.response.doc.active,
+      other: true,
+      code: "inactive",
+      message: "activation code is inactive"
+    ) as ActiveResult
+    on success -> CheckUses
+    on error -> NotValid
+  }
+
+  state CheckUses {
+    action math/ops/ops.Sub(
+      a: $FindResult.response.doc.maxUses,
+      b: $FindResult.response.doc.usedCount
+    ) as RemainingResult
+    on success -> AssertRemainingPositive
+    on error -> NotValid
+  }
+
+  state AssertRemainingPositive {
+    action math/ops/ops.AssertPositive(
+      value: $RemainingResult.response.result,
+      code: "max_uses_reached",
+      message: "activation code has reached max uses"
+    ) as UsesResult
+    on success -> Valid
+    on error -> NotValid
+  }
+
+  state Valid {
+    action services/common/response.Response(
+      value: {
+        valid: true,
+        productId: $FindResult.response.doc.productId,
+        productType: $FindResult.response.doc.productType
+      },
+      statusCode: 200
+    ) as FinalResult
+    end ok
+  }
+
+  state NotValid {
+    action services/common/response.Response(
+      value: {
+        valid: false,
+        reason: $FoundAssert.response.message
+      },
+      statusCode: 200
+    ) as FinalResult
+    end ok
+  }
+
+  state ValidateCodeFailed {
+    action services/common/response.Response(
+      value: { message: $CodeValid.response.message },
+      statusCode: 400
+    ) as ErrorResult
+    end fail
+  }
+
+  state FindCodeFailed {
+    action services/common/response.Response(
+      value: { message: $FindResult.response.message },
+      statusCode: 500
+    ) as ErrorResult
+    end fail
+  }
+}

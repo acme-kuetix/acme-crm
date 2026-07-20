@@ -1,0 +1,80 @@
+// GET /auth/me/products — return the current user's activated products.
+// Auth required: Bearer token is extracted from the Authorization header,
+// validated, and the resulting userId is used to find the customer profile
+// and its activations. Returns {count, items} where items is the list of
+// activation docs (each contains productType, productId, etc.).
+// Route require: { headers: ["Authorization"] }
+// Provided by acme-crm package.
+
+module me_products
+
+import auth/jwt
+import persistence/store
+import services/common
+
+workflow me_products {
+  start: Extract
+
+  state Extract {
+    action auth/jwt.ExtractTokenFromHeader(authHeader: $headers.Authorization??"") as Extracted
+    on success -> Validate
+    on error -> Unauthorized
+  }
+
+  state Validate {
+    action auth/jwt.ValidateToken(tokenString: $Extracted.token) as Token
+    on success -> FindProfile
+    on error -> Unauthorized
+  }
+
+  state FindProfile {
+    action persistence/store/store.FindByField(
+      collection: "customer_profiles",
+      field: "userId",
+      value: $Token.userId
+    ) as ProfileResult
+    on success -> OK
+    on error -> Empty
+  }
+
+  state OK {
+    action persistence/store/store.List(
+      collection: "activations",
+      filter: { customerProfileId: $ProfileResult.response.doc.id }
+    ) as ActivationsResult
+    on success -> Respond
+    on error -> Empty
+  }
+
+  state Respond {
+    action services/common/response.Response(
+      value: {
+        count: $ActivationsResult.response.count,
+        items: $ActivationsResult.response.docs
+      },
+      statusCode: 200
+    ) as FinalResult
+    end ok
+  }
+
+  // No customer profile yet — return an empty list (user is authenticated
+  // but hasn't been registered as a customer, e.g. admin-only users).
+  state Empty {
+    action services/common/response.Response(
+      value: {
+        count: 0,
+        items: []
+      },
+      statusCode: 200
+    ) as FinalResult
+    end ok
+  }
+
+  state Unauthorized {
+    action services/common/response.Response(
+      value: { message: "invalid or missing token" },
+      statusCode: 401
+    ) as ErrorResult
+    end fail
+  }
+}

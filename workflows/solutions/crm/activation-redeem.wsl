@@ -1,0 +1,350 @@
+// POST /activations/redeem — customer redeems an activation code.
+// JSON body: {userId, code}
+// Flow: find code → check active → check uses remaining → find customer_profile →
+// check no existing activation for this product → create activation → increment usedCount.
+// Returns {activationId, productId, productType} with 201.
+// Provided by acme-crm package.
+
+module activation_redeem
+
+import collections/ops
+import math/ops
+import persistence/store
+import sequence/sequence
+import services/common
+import strings/ops
+
+workflow activation_redeem {
+  start: ValidateCode
+
+  state ValidateCode {
+    action strings/ops/ops.AssertRequired(
+      value: $json.code,
+      code: "invalid_code",
+      message: "code is required"
+    ) as CodeValid
+    on success -> ValidateUserId
+    on error -> ValidateCodeFailed
+  }
+
+  state ValidateUserId {
+    action strings/ops/ops.AssertRequired(
+      value: $json.userId,
+      code: "invalid_input",
+      message: "userId is required"
+    ) as UserCheck
+    on success -> FindCode
+    on error -> ValidateUserIdFailed
+  }
+
+  state FindCode {
+    action persistence/store/store.FindByField(
+      collection: "activation_codes",
+      field: "code",
+      value: $CodeValid.response.value
+    ) as FindResult
+    on success -> AssertCodeFound
+    on error -> FindCodeFailed
+  }
+
+  state AssertCodeFound {
+    action collections/ops/ops.AssertFound(
+      found: $FindResult.response.found,
+      doc: $FindResult.response.doc,
+      code: "not_found",
+      message: "activation code not found"
+    ) as FoundAssert
+    on success -> CheckActive
+    on error -> AssertCodeFoundFailed
+  }
+
+  state CheckActive {
+    action strings/ops/ops.AssertEquals(
+      value: $FindResult.response.doc.active,
+      other: true,
+      code: "inactive",
+      message: "activation code is inactive"
+    ) as ActiveResult
+    on success -> CheckUsesRemaining
+    on error -> CheckActiveFailed
+  }
+
+  state CheckUsesRemaining {
+    action math/ops/ops.Sub(
+      a: $FindResult.response.doc.maxUses,
+      b: $FindResult.response.doc.usedCount
+    ) as RemainingResult
+    on success -> AssertRemainingPositive
+    on error -> CheckUsesRemainingFailed
+  }
+
+  state AssertRemainingPositive {
+    action math/ops/ops.AssertPositive(
+      value: $RemainingResult.response.result,
+      code: "max_uses_reached",
+      message: "activation code has reached max uses"
+    ) as UsesResult
+    on success -> FindProfile
+    on error -> AssertRemainingPositiveFailed
+  }
+
+  state FindProfile {
+    action persistence/store/store.FindByField(
+      collection: "customer_profiles",
+      field: "userId",
+      value: $json.userId
+    ) as ProfileResult
+    on success -> AssertProfileFound
+    on error -> FindProfileFailed
+  }
+
+  state AssertProfileFound {
+    action collections/ops/ops.AssertFound(
+      found: $ProfileResult.response.found,
+      doc: $ProfileResult.response.doc,
+      code: "profile_not_found",
+      message: "customer profile not found for this user"
+    ) as ProfileAssert
+    on success -> CheckExistingActivation
+    on error -> AssertProfileFoundFailed
+  }
+
+  state CheckExistingActivation {
+    action persistence/store/store.List(
+      collection: "activations",
+      filter: { customerProfileId: $ProfileResult.response.doc.id }
+    ) as ExistingResult
+    on success -> FilterForProduct
+    on error -> CheckExistingActivationFailed
+  }
+
+  state FilterForProduct {
+    action collections/ops/ops.Filter(
+      arr: $ExistingResult.response.docs,
+      workflow: "solutions/crm/activation-check-existing"
+    ) as FilterResult
+    on success -> CountExisting
+    on error -> FilterForProductFailed
+  }
+
+  state CountExisting {
+    action collections/ops/ops.Length(
+      arr: $FilterResult.response.results
+    ) as LenResult
+    on success -> AssertNoneExisting
+    on error -> CountExistingFailed
+  }
+
+  state AssertNoneExisting {
+    action strings/ops/ops.AssertEquals(
+      value: $LenResult.response.length,
+      other: 0,
+      code: "already_activated",
+      message: "you have already activated this product"
+    ) as NoneAssert
+    on success -> GetActivationId
+    on error -> AssertNoneExistingFailed
+  }
+
+  state GetActivationId {
+    action sequence/sequence.NextByCode(code: "activation", scope: "") as IdResult
+    on success -> CreateActivation
+    on error -> GetActivationIdFailed
+  }
+
+  state CreateActivation {
+    action persistence/store/store.Create(
+      collection: "activations",
+      id: $IdResult.response.formatted,
+      doc: {
+        id: $IdResult.response.formatted,
+        customerProfileId: $ProfileResult.response.doc.id,
+        productId: $FindResult.response.doc.productId,
+        productType: $FindResult.response.doc.productType,
+        activationCodeId: $FindResult.response.doc.id,
+        activatedAt: "now",
+        status: "active"
+      }
+    ) as CreateResult
+    on success -> IncrementUsedCount
+    on error -> CreateActivationFailed
+  }
+
+  state IncrementUsedCount {
+    action math/ops/ops.Add(
+      a: $FindResult.response.doc.usedCount,
+      b: 1
+    ) as NewCountResult
+    on success -> UpdateCode
+    on error -> IncrementUsedCountFailed
+  }
+
+  state UpdateCode {
+    action persistence/store/store.Update(
+      collection: "activation_codes",
+      id: $FindResult.response.doc.id,
+      doc: {
+        id: $FindResult.response.doc.id,
+        code: $FindResult.response.doc.code,
+        productId: $FindResult.response.doc.productId,
+        productType: $FindResult.response.doc.productType,
+        partnerTemplateId: $FindResult.response.doc.partnerTemplateId,
+        maxUses: $FindResult.response.doc.maxUses,
+        usedCount: $NewCountResult.response.result,
+        active: $FindResult.response.doc.active,
+        expiresAt: $FindResult.response.doc.expiresAt,
+        createdAt: $FindResult.response.doc.createdAt
+      }
+    ) as UpdateResult
+    on success -> OK
+    on error -> UpdateCodeFailed
+  }
+
+  state OK {
+    action services/common/response.Response(
+      value: {
+        activationId: $IdResult.response.formatted,
+        productId: $FindResult.response.doc.productId,
+        productType: $FindResult.response.doc.productType
+      },
+      statusCode: 201
+    ) as FinalResult
+    end ok
+  }
+
+  state ValidateCodeFailed {
+    action services/common/response.Response(
+      value: { message: $CodeValid.response.message },
+      statusCode: 400
+    ) as ErrorResult
+    end fail
+  }
+
+  state ValidateUserIdFailed {
+    action services/common/response.Response(
+      value: { message: $UserCheck.response.message },
+      statusCode: 400
+    ) as ErrorResult
+    end fail
+  }
+
+  state FindCodeFailed {
+    action services/common/response.Response(
+      value: { message: $FindResult.response.message },
+      statusCode: 500
+    ) as ErrorResult
+    end fail
+  }
+
+  state AssertCodeFoundFailed {
+    action services/common/response.Response(
+      value: { message: $FoundAssert.response.message },
+      statusCode: 404
+    ) as ErrorResult
+    end fail
+  }
+
+  state CheckActiveFailed {
+    action services/common/response.Response(
+      value: { message: $ActiveResult.response.message },
+      statusCode: 409
+    ) as ErrorResult
+    end fail
+  }
+
+  state CheckUsesRemainingFailed {
+    action services/common/response.Response(
+      value: { message: "failed to compute remaining uses" },
+      statusCode: 500
+    ) as ErrorResult
+    end fail
+  }
+
+  state AssertRemainingPositiveFailed {
+    action services/common/response.Response(
+      value: { message: $UsesResult.response.message },
+      statusCode: 409
+    ) as ErrorResult
+    end fail
+  }
+
+  state FindProfileFailed {
+    action services/common/response.Response(
+      value: { message: $ProfileResult.response.message },
+      statusCode: 500
+    ) as ErrorResult
+    end fail
+  }
+
+  state AssertProfileFoundFailed {
+    action services/common/response.Response(
+      value: { message: $ProfileAssert.response.message },
+      statusCode: 404
+    ) as ErrorResult
+    end fail
+  }
+
+  state CheckExistingActivationFailed {
+    action services/common/response.Response(
+      value: { message: $ExistingResult.response.message },
+      statusCode: 500
+    ) as ErrorResult
+    end fail
+  }
+
+  state FilterForProductFailed {
+    action services/common/response.Response(
+      value: { message: "failed to check existing activations" },
+      statusCode: 500
+    ) as ErrorResult
+    end fail
+  }
+
+  state CountExistingFailed {
+    action services/common/response.Response(
+      value: { message: "failed to count existing activations" },
+      statusCode: 500
+    ) as ErrorResult
+    end fail
+  }
+
+  state AssertNoneExistingFailed {
+    action services/common/response.Response(
+      value: { message: $NoneAssert.response.message },
+      statusCode: 409
+    ) as ErrorResult
+    end fail
+  }
+
+  state GetActivationIdFailed {
+    action services/common/response.Response(
+      value: { message: $IdResult.response.message },
+      statusCode: 500
+    ) as ErrorResult
+    end fail
+  }
+
+  state CreateActivationFailed {
+    action services/common/response.Response(
+      value: { message: $CreateResult.response.message },
+      statusCode: 500
+    ) as ErrorResult
+    end fail
+  }
+
+  state IncrementUsedCountFailed {
+    action services/common/response.Response(
+      value: { message: "failed to increment used count" },
+      statusCode: 500
+    ) as ErrorResult
+    end fail
+  }
+
+  state UpdateCodeFailed {
+    action services/common/response.Response(
+      value: { message: $UpdateResult.response.message },
+      statusCode: 500
+    ) as ErrorResult
+    end fail
+  }
+}
