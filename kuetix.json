@@ -1,6 +1,6 @@
 {
   "name": "acme-crm",
-  "version": "0.1.0",
+  "version": "0.1.2",
   "description": "Acme package with reusable workflows for customer relationship management: customer registration, customer profiles, product activation codes, and activation redemption",
   "author": "acme",
   "workflows": [],
